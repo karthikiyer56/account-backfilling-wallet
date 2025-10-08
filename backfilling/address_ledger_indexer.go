@@ -133,10 +133,28 @@ func main() {
 			totalAddressesUpdated += addressesInLedger
 		}
 
-		log.Printf("Processed  ledger: %v", ledgerSeq)
-
 		processedCount++
 		currentPercent := (processedCount * 100) / totalLedgers
+
+		// Periodically flush to disk since WAL is disabled (every 10000 ledgers)
+		if processedCount%10000 == 0 {
+			log.Printf("Flushing database to disk at ledger %d...", ledgerSeq)
+			fo := grocksdb.NewDefaultFlushOptions()
+			fo.SetWait(true)
+			err := db.Flush(fo)
+			fo.Destroy()
+			if err != nil {
+				log.Printf("Warning: Failed to flush database: %v", err)
+			}
+
+			size, err := getDirSize(dbPath)
+			if err != nil {
+				log.Printf("Warning: Failed to get DB size: %v", err)
+			} else {
+				log.Printf("Database size: %s", formatBytes(size))
+			}
+
+		}
 
 		// Report progress every 1%
 		if currentPercent > lastReportedPercent {
@@ -156,7 +174,26 @@ func main() {
 		}
 	}
 
+	// Flush all data to disk since WAL is disabled
+	log.Printf("Flushing database to disk...")
+	fo := grocksdb.NewDefaultFlushOptions()
+	fo.SetWait(true)
+	defer fo.Destroy()
+	err = db.Flush(fo)
+	if err != nil {
+		log.Printf("Warning: Failed to flush database: %v", err)
+	}
+
 	elapsed := time.Since(startTime)
+
+	// Print final DB size
+	finalSize, err := getDirSize(dbPath)
+	if err != nil {
+		log.Printf("Warning: Failed to get final DB size: %v", err)
+	} else {
+		log.Printf("Final database size: %s", formatBytes(finalSize))
+	}
+
 	log.Printf("Processing complete!")
 	log.Printf("  Ledgers processed: %d", processedCount)
 	log.Printf("  Total addresses updated: %d", totalAddressesUpdated)
@@ -194,6 +231,13 @@ func openRocksDB(path string, createNew bool) (*grocksdb.DB, *grocksdb.Options, 
 	opts.SetTargetFileSizeBase(128 << 20) // 128 MB
 	opts.SetMaxBackgroundJobs(6)          // Replaces deprecated SetMaxBackgroundCompactions and SetMaxBackgroundFlushes
 	opts.SetMaxOpenFiles(1000)
+
+	// Disable WAL for bulk loading performance and to prevent WAL bloat
+	// Safe for batch processing since we can restart if needed
+	opts.SetDisableAutoCompactions(false) // Keep auto compactions enabled
+	opts.SetLevel0FileNumCompactionTrigger(4)
+	opts.SetLevel0SlowdownWritesTrigger(20)
+	opts.SetLevel0StopWritesTrigger(30)
 
 	db, err := grocksdb.OpenDb(opts, path)
 	if err != nil {
@@ -288,6 +332,7 @@ func extractAddress(addressMap map[string][]byte, event *token_transfer.TokenTra
 // Maintains sorted order of ledger sequences
 func updateAddressLedgerList(db *grocksdb.DB, addressKey []byte, ledgerSeq uint32) error {
 	wo := grocksdb.NewDefaultWriteOptions()
+	wo.DisableWAL(true) // Disable WAL for bulk loading performance
 	defer wo.Destroy()
 
 	ro := grocksdb.NewDefaultReadOptions()
@@ -358,6 +403,65 @@ func updateAddressLedgerList(db *grocksdb.DB, addressKey []byte, ledgerSeq uint3
 	}
 
 	return nil
+}
+
+// getDirSize calculates the total size of a directory
+func getDirSize(path string) (int64, error) {
+	var size int64
+	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			size += info.Size()
+		}
+		return nil
+	})
+	return size, err
+}
+
+// formatBytes formats bytes into human-readable format
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+// formatNumber formats large numbers with commas
+func formatNumber(n int64) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	s := fmt.Sprintf("%d", n)
+	result := ""
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			result += ","
+		}
+		result += string(c)
+	}
+	return result
+}
+
+// contains checks if a string contains any of the substrings
+func contains(s string, substrs []string) bool {
+	for _, substr := range substrs {
+		if len(s) >= len(substr) {
+			for i := 0; i <= len(s)-len(substr); i++ {
+				if s[i:i+len(substr)] == substr {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // formatDuration formats a duration in a human-readable way
