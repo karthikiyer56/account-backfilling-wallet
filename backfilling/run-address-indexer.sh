@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# Filename: run-address-indexer.sh
+
 set -e
 
 # Parse command line arguments
@@ -50,14 +52,23 @@ fi
 
 echo "Processing ledger range: $START_LEDGER to $END_LEDGER"
 echo "Database path: $DB_PATH (mode: $DB_MODE)"
+echo ""
 
 # Run the Go program with the extracted ledger range
 if [ "$DB_MODE" = "new" ]; then
+    CMD="/tmp/address_ledger_indexer --start-ledger $START_LEDGER --end-ledger $END_LEDGER --newdb $DB_PATH"
+    echo "Running command:"
+    echo "  $CMD"
+    echo ""
     /tmp/address_ledger_indexer \
         --start-ledger "$START_LEDGER" \
         --end-ledger "$END_LEDGER" \
         --newdb "$DB_PATH"
 else
+    CMD="/tmp/address_ledger_indexer --start-ledger $START_LEDGER --end-ledger $END_LEDGER --existingdb $DB_PATH"
+    echo "Running command:"
+    echo "  $CMD"
+    echo ""
     /tmp/address_ledger_indexer \
         --start-ledger "$START_LEDGER" \
         --end-ledger "$END_LEDGER" \

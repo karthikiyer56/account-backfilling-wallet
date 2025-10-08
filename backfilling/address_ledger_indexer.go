@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
+	"github.com/stellar/go/network"
 	"github.com/stellar/go/strkey"
 	"log"
 	"os"
@@ -15,7 +16,6 @@ import (
 
 	"github.com/linxGnu/grocksdb"
 	"github.com/stellar/go/ingest/ledgerbackend"
-	"github.com/stellar/go/network"
 	"github.com/stellar/go/processors/token_transfer"
 	"github.com/stellar/go/support/datastore"
 	"github.com/stellar/go/support/errors"
@@ -66,7 +66,7 @@ func main() {
 	datastoreConfig := datastore.DataStoreConfig{
 		Type: "GCS",
 		Params: map[string]string{
-			"destination_bucket_path": "sdf-ledger-close-meta/ledgers/pubnet",
+			"destination_bucket_path": "sdf-ledger-close-meta/v1/ledgers/pubnet",
 		},
 	}
 
@@ -122,14 +122,18 @@ func main() {
 			log.Fatalf("Failed to retrieve ledger %d: %v", ledgerSeq, err)
 		}
 
-		// Process token transfer events in this ledger
-		addressesInLedger, err := processLedger(db, ledger, ledgerSeq)
+		processor := token_transfer.NewEventsProcessorForUnifiedEvents(network.PublicNetworkPassphrase)
+
+		//Process token transfer events in this ledger
+		addressesInLedger, err := processLedger(processor, db, ledger, ledgerSeq)
 		if err != nil {
 			log.Printf("Error processing ledger %d: %v", ledgerSeq, err)
 			// Continue processing other ledgers
 		} else {
 			totalAddressesUpdated += addressesInLedger
 		}
+
+		log.Printf("Processed  ledger: %v", ledgerSeq)
 
 		processedCount++
 		currentPercent := (processedCount * 100) / totalLedgers
@@ -201,9 +205,8 @@ func openRocksDB(path string, createNew bool) (*grocksdb.DB, *grocksdb.Options, 
 }
 
 // processLedger processes all token transfer events in a ledger using the token_transfer processor
-func processLedger(db *grocksdb.DB, ledger xdr.LedgerCloseMeta, ledgerSeq uint32) (int, error) {
+func processLedger(processor *token_transfer.EventsProcessor, db *grocksdb.DB, ledger xdr.LedgerCloseMeta, ledgerSeq uint32) (int, error) {
 	// Use the token transfer processor to extract events
-	processor := token_transfer.NewEventsProcessorForUnifiedEvents(network.PublicNetworkPassphrase)
 	events, err := processor.EventsFromLedger(ledger)
 	if err != nil {
 		return 0, errors.Wrapf(err, "failed to process events from ledger %d", ledgerSeq)
@@ -254,21 +257,30 @@ func extractAddress(addressMap map[string][]byte, event *token_transfer.TokenTra
 		from = event.GetClawback().From
 	}
 
-	if _, exists := addressMap[from]; !exists {
-		keyBytes, err := StrkeyToRocksDBKey(from)
-		if err != nil {
-			return errors.Wrap(err, "failed to convert from key to rocksdb key")
+	if from != "" {
+		if _, exists := addressMap[from]; !exists {
+			keyBytes, err := StrkeyToRocksDBKey(from)
+			if err != nil {
+				return errors.Wrap(err, "failed to convert from key to rocksdb key")
+			}
+			if keyBytes != nil {
+				addressMap[from] = keyBytes
+			}
 		}
-		addressMap[from] = keyBytes
 	}
 
-	if _, exists := addressMap[to]; !exists {
-		keyBytes, err := StrkeyToRocksDBKey(to)
-		if err != nil {
-			return errors.Wrap(err, "failed to convert to key to rocksdb key")
+	if to != "" {
+		if _, exists := addressMap[to]; !exists {
+			keyBytes, err := StrkeyToRocksDBKey(to)
+			if err != nil {
+				return errors.Wrap(err, "failed to convert to key to rocksdb key")
+			}
+			if keyBytes != nil {
+				addressMap[to] = keyBytes
+			}
 		}
-		addressMap[to] = keyBytes
 	}
+
 	return nil
 }
 
@@ -375,12 +387,12 @@ func StrkeyToRocksDBKey(strkeyStr string) ([]byte, error) {
 	// Use DecodeAny to handle both G-addresses and C-addresses
 	version, payload, err := strkey.DecodeAny(strkeyStr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode strkey: %w", err)
+		return nil, fmt.Errorf("failed to decode strkey: '%s', error: %w", strkeyStr, err)
 	}
 
 	// Verify it's either an account ID or contract address
 	if version != strkey.VersionByteAccountID && version != strkey.VersionByteContract {
-		return nil, fmt.Errorf("expected G-address or C-address, got version byte: %d", version)
+		return nil, nil
 	}
 
 	// Create the key: [version_byte][payload]
