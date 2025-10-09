@@ -117,7 +117,7 @@ func main() {
 
 	// Batch accumulator: map[addressKey][]ledgerSeqs
 	batchData := make(map[string][]uint32)
-	const batchSize = 1000
+	const batchSize = 10000
 
 	// Iterate through the ledger sequence
 	for ledgerSeq := ledgerRange.From(); ledgerSeq <= ledgerRange.To(); ledgerSeq++ {
@@ -152,21 +152,23 @@ func main() {
 			// Clear batch data
 			batchData = make(map[string][]uint32)
 
-			// Flush to disk
-			log.Printf("Flushing database to disk at ledger %d...", ledgerSeq)
-			fo := grocksdb.NewDefaultFlushOptions()
-			fo.SetWait(true)
-			err = db.Flush(fo)
-			fo.Destroy()
-			if err != nil {
-				log.Printf("Warning: Failed to flush database: %v", err)
-			}
+			// Flush to disk and show stats every 10,000 ledgers only
+			if processedCount%batchSize == 0 {
+				log.Printf("Flushing database to disk at ledger %d...", ledgerSeq)
+				fo := grocksdb.NewDefaultFlushOptions()
+				fo.SetWait(true)
+				err = db.Flush(fo)
+				fo.Destroy()
+				if err != nil {
+					log.Printf("Warning: Failed to flush database: %v", err)
+				}
 
-			size, err := getDirSize(dbPath)
-			if err != nil {
-				log.Printf("Warning: Failed to get DB size: %v", err)
-			} else {
-				log.Printf("Database size: %s", formatBytes(size))
+				size, err := getDirSize(dbPath)
+				if err != nil {
+					log.Printf("Warning: Failed to get DB size: %v", err)
+				} else {
+					log.Printf("Database size: %s", formatBytes(size))
+				}
 			}
 		}
 
@@ -258,6 +260,11 @@ func openRocksDB(path string, createNew bool) (*grocksdb.DB, *grocksdb.Options, 
 	opts.SetMaxBackgroundJobs(6)          // Replaces deprecated SetMaxBackgroundCompactions and SetMaxBackgroundFlushes
 	opts.SetMaxOpenFiles(1000)
 
+	// Reduce RocksDB logging to prevent LOG file bloat
+	opts.SetInfoLogLevel(grocksdb.WarnInfoLogLevel) // Only log warnings and errors
+	opts.SetMaxLogFileSize(10 << 20)                // 10 MB max per log file
+	opts.SetKeepLogFileNum(2)                       // Keep only 2 log files
+
 	// Disable WAL for bulk loading performance and to prevent WAL bloat
 	// Safe for batch processing since we can restart if needed
 	opts.SetDisableAutoCompactions(false) // Keep auto compactions enabled
@@ -295,7 +302,8 @@ func processLedgerToBatch(processor *token_transfer.EventsProcessor, batchData m
 
 	// Add addresses from this ledger to the batch
 	for _, keyBytes := range addressesInLedger {
-		keyStr := string(keyBytes) // Use bytes as string map key. HACK but works
+		// Use base64 encoding of key as map key for consistency
+		keyStr := string(keyBytes)
 
 		// Check if this address already has ledgers in the batch
 		if existingLedgers, exists := batchData[keyStr]; exists {
@@ -333,7 +341,7 @@ func writeBatchToDatabase(db *grocksdb.DB, batchData map[string][]uint32) (int, 
 	for keyStr, newLedgers := range batchData {
 		addressKey := []byte(keyStr)
 
-		// 1. Read existing ledgers from DB
+		// Read existing value from database
 		existingValue, err := db.Get(ro, addressKey)
 		if err != nil {
 			return addressesUpdated, errors.Wrap(err, "failed to read from RocksDB")
