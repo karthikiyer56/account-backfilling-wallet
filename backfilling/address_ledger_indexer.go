@@ -84,7 +84,7 @@ func main() {
 
 	// Configure the BufferedStorageBackend
 	backendConfig := ledgerbackend.BufferedStorageBackendConfig{
-		BufferSize: 100,
+		BufferSize: 1000,
 		NumWorkers: 10,
 		RetryLimit: 3,
 		RetryWait:  5 * time.Second,
@@ -115,6 +115,10 @@ func main() {
 	startTime := time.Now()
 	totalAddressesUpdated := 0
 
+	// Batch accumulator: map[addressKey][]ledgerSeqs
+	batchData := make(map[string][]uint32)
+	const batchSize = 1000
+
 	// Iterate through the ledger sequence
 	for ledgerSeq := ledgerRange.From(); ledgerSeq <= ledgerRange.To(); ledgerSeq++ {
 		ledger, err := backend.GetLedger(ctx, ledgerSeq)
@@ -124,24 +128,35 @@ func main() {
 
 		processor := token_transfer.NewEventsProcessorForUnifiedEvents(network.PublicNetworkPassphrase)
 
-		//Process token transfer events in this ledger
-		addressesInLedger, err := processLedger(processor, db, ledger, ledgerSeq)
+		// Process token transfer events in this ledger and accumulate in batch
+		err = processLedgerToBatch(processor, batchData, ledger, ledgerSeq)
 		if err != nil {
 			log.Printf("Error processing ledger %d: %v", ledgerSeq, err)
 			// Continue processing other ledgers
-		} else {
-			totalAddressesUpdated += addressesInLedger
 		}
 
 		processedCount++
 		currentPercent := (processedCount * 100) / totalLedgers
 
-		// Periodically flush to disk since WAL is disabled (every 10000 ledgers)
-		if processedCount%10000 == 0 {
+		// Write to database every 1000 ledgers
+		if processedCount%batchSize == 0 {
+			log.Printf("Writing batch to database at ledger %d (%d addresses accumulated)...", ledgerSeq, len(batchData))
+			addressesWritten, err := writeBatchToDatabase(db, batchData)
+			if err != nil {
+				log.Printf("Error writing batch to database: %v", err)
+			} else {
+				totalAddressesUpdated += addressesWritten
+				log.Printf("Batch written: %d addresses updated", addressesWritten)
+			}
+
+			// Clear batch data
+			batchData = make(map[string][]uint32)
+
+			// Flush to disk
 			log.Printf("Flushing database to disk at ledger %d...", ledgerSeq)
 			fo := grocksdb.NewDefaultFlushOptions()
 			fo.SetWait(true)
-			err := db.Flush(fo)
+			err = db.Flush(fo)
 			fo.Destroy()
 			if err != nil {
 				log.Printf("Warning: Failed to flush database: %v", err)
@@ -153,7 +168,6 @@ func main() {
 			} else {
 				log.Printf("Database size: %s", formatBytes(size))
 			}
-
 		}
 
 		// Report progress every 1%
@@ -171,6 +185,18 @@ func main() {
 				totalAddressesUpdated, formatDuration(timeRemaining))
 
 			lastReportedPercent = currentPercent
+		}
+	}
+
+	// Write any remaining batch data
+	if len(batchData) > 0 {
+		log.Printf("Writing final batch to database (%d addresses)...", len(batchData))
+		addressesWritten, err := writeBatchToDatabase(db, batchData)
+		if err != nil {
+			log.Printf("Error writing final batch to database: %v", err)
+		} else {
+			totalAddressesUpdated += addressesWritten
+			log.Printf("Final batch written: %d addresses updated", addressesWritten)
 		}
 	}
 
@@ -248,35 +274,131 @@ func openRocksDB(path string, createNew bool) (*grocksdb.DB, *grocksdb.Options, 
 	return db, opts, nil
 }
 
-// processLedger processes all token transfer events in a ledger using the token_transfer processor
-func processLedger(processor *token_transfer.EventsProcessor, db *grocksdb.DB, ledger xdr.LedgerCloseMeta, ledgerSeq uint32) (int, error) {
+// processLedgerToBatch processes a ledger and accumulates addresses in the batch map
+func processLedgerToBatch(processor *token_transfer.EventsProcessor, batchData map[string][]uint32, ledger xdr.LedgerCloseMeta, ledgerSeq uint32) error {
 	// Use the token transfer processor to extract events
 	events, err := processor.EventsFromLedger(ledger)
 	if err != nil {
-		return 0, errors.Wrapf(err, "failed to process events from ledger %d", ledgerSeq)
+		return errors.Wrapf(err, "failed to process events from ledger %d", ledgerSeq)
 	}
 
-	// Map to track unique addresses in this ledger (deduplicate)
+	// Map to track unique addresses in this ledger (deduplicate within this ledger)
 	addressesInLedger := make(map[string][]byte)
 
 	// Process each event
 	for _, event := range events {
 		err := extractAddress(addressesInLedger, event)
 		if err != nil {
-			return 0, err
+			return err
 		}
 	}
 
-	// Update RocksDB for all unique addresses in this ledger
-	addressesUpdated := 0
+	// Add addresses from this ledger to the batch
 	for _, keyBytes := range addressesInLedger {
-		if err := updateAddressLedgerList(db, keyBytes, ledgerSeq); err != nil {
-			return addressesUpdated, errors.Wrapf(err, "failed to update address in ledger %d", ledgerSeq)
+		keyStr := string(keyBytes) // Use bytes as string map key. HACK but works
+
+		// Check if this address already has ledgers in the batch
+		if existingLedgers, exists := batchData[keyStr]; exists {
+			// Check if this ledger is already in the list
+			found := false
+			for _, seq := range existingLedgers {
+				if seq == ledgerSeq {
+					found = true
+					break
+				}
+			}
+			if !found {
+				batchData[keyStr] = append(existingLedgers, ledgerSeq)
+			}
+		} else {
+			// New address in this batch
+			batchData[keyStr] = []uint32{ledgerSeq}
 		}
+	}
+
+	return nil
+}
+
+// writeBatchToDatabase writes accumulated batch data to RocksDB
+func writeBatchToDatabase(db *grocksdb.DB, batchData map[string][]uint32) (int, error) {
+	wo := grocksdb.NewDefaultWriteOptions()
+	wo.DisableWAL(true) // Disable WAL for bulk loading performance
+	defer wo.Destroy()
+
+	ro := grocksdb.NewDefaultReadOptions()
+	defer ro.Destroy()
+
+	addressesUpdated := 0
+
+	for keyStr, newLedgers := range batchData {
+		addressKey := []byte(keyStr)
+
+		// 1. Read existing ledgers from DB
+		existingValue, err := db.Get(ro, addressKey)
+		if err != nil {
+			return addressesUpdated, errors.Wrap(err, "failed to read from RocksDB")
+		}
+
+		existingData := existingValue.Data()
+
+		// Parse existing ledgers
+		var allLedgers []uint32
+		if len(existingData) > 0 {
+			numExisting := len(existingData) / 4
+			for i := 0; i < numExisting; i++ {
+				ledger := binary.BigEndian.Uint32(existingData[i*4 : (i+1)*4])
+				allLedgers = append(allLedgers, ledger)
+			}
+		}
+		existingValue.Free()
+
+		// Merge with new ledgers
+		for _, newLedger := range newLedgers {
+			// Check if already exists
+			found := false
+			for _, existing := range allLedgers {
+				if existing == newLedger {
+					found = true
+					break
+				}
+			}
+			if !found {
+				allLedgers = append(allLedgers, newLedger)
+			}
+		}
+
+		// Sort all ledgers
+		sortUint32Slice(allLedgers)
+
+		// Encode to bytes
+		newValue := make([]byte, len(allLedgers)*4)
+		for i, ledger := range allLedgers {
+			binary.BigEndian.PutUint32(newValue[i*4:], ledger)
+		}
+
+		// Write to database
+		err = db.Put(wo, addressKey, newValue)
+		if err != nil {
+			return addressesUpdated, errors.Wrap(err, "failed to write to RocksDB")
+		}
+
 		addressesUpdated++
 	}
 
 	return addressesUpdated, nil
+}
+
+// sortUint32Slice sorts a slice of uint32 in ascending order
+func sortUint32Slice(slice []uint32) {
+	// Simple bubble sort (fine for our use case since ledgers are mostly sorted)
+	n := len(slice)
+	for i := 0; i < n; i++ {
+		for j := 0; j < n-i-1; j++ {
+			if slice[j] > slice[j+1] {
+				slice[j], slice[j+1] = slice[j+1], slice[j]
+			}
+		}
+	}
 }
 
 // extractAddress extracts the hash bytes from a token transfer address (G or C address)
@@ -328,83 +450,6 @@ func extractAddress(addressMap map[string][]byte, event *token_transfer.TokenTra
 	return nil
 }
 
-// updateAddressLedgerList updates the ledger list for an address in RocksDB
-// Maintains sorted order of ledger sequences
-func updateAddressLedgerList(db *grocksdb.DB, addressKey []byte, ledgerSeq uint32) error {
-	wo := grocksdb.NewDefaultWriteOptions()
-	wo.DisableWAL(true) // Disable WAL for bulk loading performance
-	defer wo.Destroy()
-
-	ro := grocksdb.NewDefaultReadOptions()
-	defer ro.Destroy()
-
-	// Read existing value
-	existingValue, err := db.Get(ro, addressKey)
-	if err != nil {
-		return errors.Wrap(err, "failed to read from RocksDB")
-	}
-	defer existingValue.Free()
-
-	var newValue []byte
-	existingData := existingValue.Data()
-
-	if len(existingData) == 0 {
-		// New address - create new list with this ledger
-		newValue = make([]byte, 4)
-		binary.BigEndian.PutUint32(newValue, ledgerSeq)
-	} else {
-		// Existing address - find insertion point to maintain sorted order
-		numLedgers := len(existingData) / 4
-		insertPos := -1
-		alreadyExists := false
-
-		for i := 0; i < numLedgers; i++ {
-			existingLedger := binary.BigEndian.Uint32(existingData[i*4 : (i+1)*4])
-
-			if existingLedger == ledgerSeq {
-				// Ledger already exists, no update needed
-				alreadyExists = true
-				break
-			}
-
-			if existingLedger > ledgerSeq {
-				// Found the position where we should insert
-				insertPos = i
-				break
-			}
-		}
-
-		if alreadyExists {
-			return nil
-		}
-
-		// If insertPos is still -1, append to the end
-		if insertPos == -1 {
-			insertPos = numLedgers
-		}
-
-		// Create new value with the ledger inserted at the correct position
-		newValue = make([]byte, len(existingData)+4)
-
-		// Copy data before insertion point
-		copy(newValue, existingData[:insertPos*4])
-
-		// Insert new ledger
-		binary.BigEndian.PutUint32(newValue[insertPos*4:], ledgerSeq)
-
-		// Copy data after insertion point
-		copy(newValue[(insertPos+1)*4:], existingData[insertPos*4:])
-	}
-
-	// Write updated value
-	err = db.Put(wo, addressKey, newValue)
-	if err != nil {
-		return errors.Wrap(err, "failed to write to RocksDB")
-	}
-
-	return nil
-}
-
 // getDirSize calculates the total size of a directory
 func getDirSize(path string) (int64, error) {
 	var size int64
@@ -448,20 +493,6 @@ func formatNumber(n int64) string {
 		result += string(c)
 	}
 	return result
-}
-
-// contains checks if a string contains any of the substrings
-func contains(s string, substrs []string) bool {
-	for _, substr := range substrs {
-		if len(s) >= len(substr) {
-			for i := 0; i <= len(s)-len(substr); i++ {
-				if s[i:i+len(substr)] == substr {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 // formatDuration formats a duration in a human-readable way
