@@ -85,7 +85,7 @@ func main() {
 	// Configure the BufferedStorageBackend
 	backendConfig := ledgerbackend.BufferedStorageBackendConfig{
 		BufferSize: 1000,
-		NumWorkers: 10,
+		NumWorkers: 20,
 		RetryLimit: 3,
 		RetryWait:  5 * time.Second,
 	}
