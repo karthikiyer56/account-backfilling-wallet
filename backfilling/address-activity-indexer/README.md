@@ -545,6 +545,484 @@ func GetAddressActivitiesHandler(w http.ResponseWriter, r *http.Request) {
 
 ---
 
+## Running Queries with Docker Exec
+
+You can run queries directly on the ClickHouse container without writing Go code.
+
+### Basic Syntax
+```bash
+docker exec <container-name> clickhouse-client --query "SQL QUERY HERE"
+```
+
+---
+
+## Count Queries
+
+### Count Total Events for an Address
+```bash
+# Count all events for an address
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT count(*) as total_events
+FROM stellar.address_activity
+WHERE address = 'GABC123...'
+"
+```
+
+### Count Events for Address in Date Range
+```bash
+# Count events between specific dates
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT count(*) as total_events
+FROM stellar.address_activity
+WHERE address = 'GABC123...'
+  AND closed_at >= '2025-01-01 00:00:00'
+  AND closed_at < '2025-02-01 00:00:00'
+"
+```
+
+### Count Events for Address in Specific Month
+```bash
+# Count events in October 2025
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT count(*) as total_events
+FROM stellar.address_activity
+WHERE address = 'GABC123...'
+  AND toYYYYMM(closed_at) = 202510
+"
+```
+
+### Count All Events in Date Range
+```bash
+# Count total events across all addresses
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT count(*) as total_events
+FROM stellar.events_canonical
+WHERE closed_at >= '2025-01-01 00:00:00'
+  AND closed_at < '2025-02-01 00:00:00'
+"
+```
+
+### Count Events by Type for an Address
+```bash
+# Breakdown by event type
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT 
+    event_type,
+    count(*) as count
+FROM stellar.address_activity
+WHERE address = 'GABC123...'
+  AND closed_at >= '2025-01-01 00:00:00'
+  AND closed_at < '2025-02-01 00:00:00'
+GROUP BY event_type
+ORDER BY count DESC
+FORMAT PrettyCompact
+"
+```
+
+---
+
+## Aggregation Queries
+
+### Count Events Per Day for an Address
+```bash
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT 
+    toDate(closed_at) as date,
+    count(*) as events
+FROM stellar.address_activity
+WHERE address = 'GABC123...'
+  AND closed_at >= '2025-01-01 00:00:00'
+  AND closed_at < '2025-02-01 00:00:00'
+GROUP BY date
+ORDER BY date DESC
+FORMAT PrettyCompact
+"
+```
+
+### Total Amount Transferred by an Address
+```bash
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT 
+    sum(toFloat64OrZero(amount)) as total_amount,
+    asset_type,
+    asset_code
+FROM stellar.address_activity
+WHERE address = 'GABC123...'
+  AND event_type = 'transfer'
+  AND from_address = 'GABC123...'
+  AND closed_at >= '2025-01-01 00:00:00'
+  AND closed_at < '2025-02-01 00:00:00'
+GROUP BY asset_type, asset_code
+FORMAT PrettyCompact
+"
+```
+
+### Most Active Addresses in Date Range
+```bash
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT 
+    address,
+    count(*) as activity_count
+FROM stellar.address_activity
+WHERE closed_at >= '2025-01-01 00:00:00'
+  AND closed_at < '2025-02-01 00:00:00'
+GROUP BY address
+ORDER BY activity_count DESC
+LIMIT 20
+FORMAT PrettyCompact
+"
+```
+
+---
+
+## Time-Based Queries
+
+### Events Per Hour for an Address (Last 24 Hours)
+```bash
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT 
+    toStartOfHour(closed_at) as hour,
+    count(*) as events
+FROM stellar.address_activity
+WHERE address = 'GABC123...'
+  AND closed_at >= now() - INTERVAL 24 HOUR
+GROUP BY hour
+ORDER BY hour DESC
+FORMAT PrettyCompact
+"
+```
+
+### First and Last Activity for an Address
+```bash
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT 
+    min(closed_at) as first_activity,
+    max(closed_at) as last_activity,
+    dateDiff('day', min(closed_at), max(closed_at)) as active_days,
+    count(*) as total_events
+FROM stellar.address_activity
+WHERE address = 'GABC123...'
+FORMAT PrettyCompact
+"
+```
+
+---
+
+## Table Statistics
+
+### Total Events and Storage Size
+```bash
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT 
+    table,
+    formatReadableQuantity(sum(rows)) as total_rows,
+    formatReadableSize(sum(bytes_on_disk)) as disk_size,
+    formatReadableSize(sum(data_compressed_bytes)) as compressed,
+    formatReadableSize(sum(data_uncompressed_bytes)) as uncompressed,
+    round(sum(data_uncompressed_bytes) / sum(data_compressed_bytes), 2) as compression_ratio
+FROM system.parts
+WHERE database = 'stellar'
+  AND table IN ('events_canonical', 'address_activity')
+  AND active
+GROUP BY table
+FORMAT PrettyCompact
+"
+```
+
+### Events Per Partition (Per Month)
+```bash
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT 
+    partition,
+    formatReadableQuantity(sum(rows)) as events,
+    formatReadableSize(sum(bytes_on_disk)) as size
+FROM system.parts
+WHERE database = 'stellar'
+  AND table = 'address_activity'
+  AND active
+GROUP BY partition
+ORDER BY partition DESC
+FORMAT PrettyCompact
+"
+```
+
+### Unique Addresses Count
+```bash
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT 
+    formatReadableQuantity(count(DISTINCT address)) as unique_addresses
+FROM stellar.address_activity
+"
+```
+
+---
+
+## Activity Distribution Queries
+
+### Event Type Distribution (All Time)
+```bash
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT 
+    event_type,
+    formatReadableQuantity(count(*)) as count,
+    round(count(*) * 100.0 / sum(count(*)) OVER (), 2) as percentage
+FROM stellar.events_canonical
+GROUP BY event_type
+ORDER BY count DESC
+FORMAT PrettyCompact
+"
+```
+
+### Asset Distribution for an Address
+```bash
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT 
+    asset_type,
+    asset_code,
+    count(*) as transactions,
+    round(count(*) * 100.0 / sum(count(*)) OVER (), 2) as percentage
+FROM stellar.address_activity
+WHERE address = 'GABC123...'
+  AND asset_type != 'none'
+GROUP BY asset_type, asset_code
+ORDER BY transactions DESC
+LIMIT 10
+FORMAT PrettyCompact
+"
+```
+
+### Activity Frequency Distribution
+```bash
+# How many addresses have 1 event, 2-10 events, etc.
+docker exec clickhouse-activity clickhouse-client --query "
+WITH address_counts AS (
+    SELECT 
+        address,
+        count(*) as event_count
+    FROM stellar.address_activity
+    WHERE closed_at >= '2025-01-01 00:00:00'
+      AND closed_at < '2025-02-01 00:00:00'
+    GROUP BY address
+)
+SELECT 
+    CASE
+        WHEN event_count = 1 THEN '1 event'
+        WHEN event_count <= 10 THEN '2-10 events'
+        WHEN event_count <= 100 THEN '11-100 events'
+        WHEN event_count <= 1000 THEN '101-1,000 events'
+        ELSE '1,000+ events'
+    END as frequency_range,
+    formatReadableQuantity(count(*)) as address_count
+FROM address_counts
+GROUP BY frequency_range
+ORDER BY min(event_count)
+FORMAT PrettyCompact
+"
+```
+
+---
+
+## Sample Data Queries
+
+### Get Last 5 Events for an Address
+```bash
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT 
+    closed_at,
+    event_type,
+    from_address,
+    to_address,
+    amount,
+    asset_type,
+    asset_code
+FROM stellar.address_activity
+WHERE address = 'GABC123...'
+ORDER BY closed_at DESC, ledger_sequence DESC
+LIMIT 5
+FORMAT PrettyCompact
+"
+```
+
+### Get All Transfers Between Two Addresses
+```bash
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT 
+    closed_at,
+    amount,
+    asset_type,
+    asset_code,
+    ledger_sequence,
+    tx_hash
+FROM stellar.address_activity
+WHERE event_type = 'transfer'
+  AND (
+    (from_address = 'GABC123...' AND to_address = 'GDEF456...')
+    OR
+    (from_address = 'GDEF456...' AND to_address = 'GABC123...')
+  )
+ORDER BY closed_at DESC
+LIMIT 20
+FORMAT PrettyCompact
+"
+```
+
+---
+
+## Performance Testing Queries
+
+### Query Performance Test
+```bash
+# Test query speed for an address
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT count(*) as result
+FROM stellar.address_activity
+WHERE address = 'GABC123...'
+  AND closed_at >= '2025-01-01 00:00:00'
+SETTINGS max_threads = 1
+FORMAT PrettyCompact
+" --time
+```
+
+The `--time` flag shows execution time.
+
+### Check If Index Is Used
+```bash
+docker exec clickhouse-activity clickhouse-client --query "
+EXPLAIN indexes = 1
+SELECT * FROM stellar.address_activity
+WHERE address = 'GABC123...'
+ORDER BY closed_at DESC
+LIMIT 20
+"
+```
+
+Should show: `Index: primary key (used)`
+
+---
+
+## Helper Bash Functions
+
+Add these to your `~/.bashrc` or `~/.zshrc` for convenience:
+```bash
+# Query ClickHouse activity table
+chquery() {
+    docker exec clickhouse-activity clickhouse-client --query "$1"
+}
+
+# Count events for address
+ch_count_address() {
+    local address=$1
+    chquery "SELECT count(*) FROM stellar.address_activity WHERE address = '$address'"
+}
+
+# Count events in date range
+ch_count_range() {
+    local start=$1
+    local end=$2
+    chquery "SELECT count(*) FROM stellar.events_canonical WHERE closed_at >= '$start' AND closed_at < '$end'"
+}
+
+# Last 5 events for address
+ch_last_events() {
+    local address=$1
+    chquery "
+    SELECT closed_at, event_type, amount, asset_type 
+    FROM stellar.address_activity 
+    WHERE address = '$address' 
+    ORDER BY closed_at DESC 
+    LIMIT 5 
+    FORMAT PrettyCompact"
+}
+```
+
+**Usage:**
+```bash
+# After adding to ~/.bashrc
+source ~/.bashrc
+
+ch_count_address "GABC123..."
+ch_count_range "2025-01-01 00:00:00" "2025-02-01 00:00:00"
+ch_last_events "GABC123..."
+```
+
+---
+
+## Output Formats
+
+ClickHouse supports multiple output formats:
+```bash
+# Pretty table format (default)
+FORMAT PrettyCompact
+
+# JSON
+FORMAT JSON
+
+# CSV
+FORMAT CSV
+
+# Tab-separated
+FORMAT TSV
+
+# Vertical (one column per line)
+FORMAT Vertical
+```
+
+**Example:**
+```bash
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT * FROM stellar.address_activity WHERE address = 'GABC123...' LIMIT 1
+FORMAT JSON
+"
+```
+
+---
+
+## Tips
+
+### Use Variables for Common Queries
+```bash
+# Set variables
+ADDRESS="GABC123..."
+START_DATE="2025-01-01 00:00:00"
+END_DATE="2025-02-01 00:00:00"
+
+# Use in query
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT count(*) 
+FROM stellar.address_activity 
+WHERE address = '$ADDRESS'
+  AND closed_at >= '$START_DATE'
+  AND closed_at < '$END_DATE'
+"
+```
+
+### Multi-line Queries for Readability
+```bash
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT 
+    toDate(closed_at) as date,
+    event_type,
+    count(*) as events
+FROM stellar.address_activity
+WHERE address = '$ADDRESS'
+  AND closed_at >= '$START_DATE'
+  AND closed_at < '$END_DATE'
+GROUP BY date, event_type
+ORDER BY date DESC, events DESC
+FORMAT PrettyCompact
+"
+```
+
+### Save Query Results to File
+```bash
+docker exec clickhouse-activity clickhouse-client --query "
+SELECT * FROM stellar.address_activity WHERE address = 'GABC123...'
+FORMAT CSV
+" > results.csv
+```
+
+---
+
 ## FAQs
 
 **Q: Why write twice (materialized view duplication)?**  
