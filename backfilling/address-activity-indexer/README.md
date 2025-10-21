@@ -1,4 +1,4 @@
-markdown# Stellar Activity Indexer for ClickHouse
+# Stellar Activity Indexer for ClickHouse
 
 A high-performance indexer for Stellar blockchain token transfer events, designed to enable efficient address-based activity queries with cursor-based pagination.
 
@@ -185,26 +185,25 @@ The indexer tracks and displays performance metrics every 1000 ledgers:
 │                   BATCH PERFORMANCE METRICS                 │
 ├─────────────────────────────────────────────────────────────┤
 │ Ledger Fetch (GCS):                                         │
-│   Avg Time:          12.45 ms/ledger                        │
-│   Samples:             1000 ledgers                         │
-│   Throughput:          80.3 ledgers/sec                     │
+│   Avg Time:          16.93 ms/ledger                        │
+│   Samples:            1000 ledgers                           │
+│   Throughput:         59.1 ledgers/sec                      │
 │                                                             │
 │ Event Processing:                                           │
-│   Avg Time:           8.23 ms/ledger                        │
-│   Samples:             1000 ledgers                         │
-│   Avg Events:          45.8 events/ledger                   │
-│   Throughput:         121.5 ledgers/sec                     │
+│   Avg Time:           2.91 ms/ledger                        │
+│   Samples:            1000 ledgers                           │
+│   Avg Events:          0.0 events/ledger                    │
+│   Throughput:        344.1 ledgers/sec                      │
 │                                                             │
 │ Database Write (Batch):                                     │
-│   Avg Time:         845.32 ms/batch                         │
-│   Samples:                1 batches                         │
-│   This Batch:         45823 rows inserted                   │
-│   Throughput:         54205 rows/sec                        │
+│   Avg Time:           0.00 ms/batch                         │
+│   Samples:               6 batches                           │
+│   This Batch:       522402 rows inserted                     │
 │                                                             │
 │ Combined Performance:                                       │
-│   Total Avg:          21.53 ms/ledger (fetch+process+write)│
-│   Throughput:          46.4 ledgers/sec                     │
-│   Breakdown:          57.8% fetch, 38.2% process, 3.9% write│
+│   Total Avg:         19.84 ms/ledger (fetch+process+write) │
+│   Throughput:         50.4 ledgers/sec                      │
+│   Breakdown:      85.4% fetch, 14.6% process, 0.0% write    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
