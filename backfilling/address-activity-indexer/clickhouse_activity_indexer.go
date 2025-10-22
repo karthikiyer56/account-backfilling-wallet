@@ -238,7 +238,7 @@ func main() {
 		BufferSize: 1000,
 		NumWorkers: 100,
 		RetryLimit: 3,
-		RetryWait:  1 * time.Second,
+		RetryWait:  3 * time.Second,
 	}
 
 	backend, err := ledgerbackend.NewBufferedStorageBackend(backendConfig, dataStore, dataStoreSchema)
@@ -307,7 +307,8 @@ func main() {
 		// Write batch every 1000 ledgers
 		if processedCount%batchSize == 0 {
 			uniqueAddresses := countUniqueAddresses(batchData)
-			log.Printf("Writing batch at ledger %d (%d events, %d unique addresses)...",
+			log.Printf("(startLedger: %d, endLedger: %d) - Writing batch at ledger %d (%d events, %d unique addresses)...",
+				startLedger, endLedger,
 				ledgerSeq, len(batchData), uniqueAddresses)
 
 			// Measure DB write time
@@ -340,7 +341,8 @@ func main() {
 				timeRemaining = time.Duration(float64(remaining)/ledgersPerSec) * time.Second
 			}
 
-			log.Printf("Progress: %d/%d ledgers (%d%%) | %.2f ledgers/sec | %d total rows | ETA: %s",
+			log.Printf("(startLedger: %d, endLedger: %d) -  Progress: %d/%d ledgers (%d%%) | %.2f ledgers/sec | %d total rows | ETA: %s",
+				startLedger, endLedger,
 				processedCount, totalLedgers, currentPercent, ledgersPerSec,
 				totalRowsInserted, formatDuration(timeRemaining))
 
