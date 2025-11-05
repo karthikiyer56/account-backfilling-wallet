@@ -2,6 +2,7 @@
 package main
 
 import (
+	"account-backfilling-wallet/backfilling/helpers"
 	"context"
 	"flag"
 	"fmt"
@@ -193,7 +194,7 @@ func main() {
 	flag.UintVar(&startLedger, "start-ledger", 0, "Starting ledger sequence")
 	flag.UintVar(&endLedger, "end-ledger", 0, "Ending ledger sequence")
 	flag.StringVar(&clickhouseHost, "clickhouse-host", "localhost", "ClickHouse host")
-	flag.IntVar(&clickhousePort, "clickhouse-port", 9000, "ClickHouse native port")
+	flag.IntVar(&clickhousePort, "clickhouse-port", 9001, "ClickHouse native port")
 	flag.StringVar(&clickhousePassword, "clickhouse-password", "", "ClickHouse password")
 	flag.StringVar(&database, "database", "stellar", "Database name")
 	flag.Parse()
@@ -203,7 +204,7 @@ func main() {
 	}
 
 	// Connect to ClickHouse
-	conn, err := connectClickHouse(clickhouseHost, clickhousePort, clickhousePassword, database)
+	conn, err := helpers.ConnectClickHouse(clickhouseHost, clickhousePort, clickhousePassword, database)
 	if err != nil {
 		log.Fatalf("Failed to connect to ClickHouse: %v", err)
 	}
@@ -344,7 +345,7 @@ func main() {
 			log.Printf("(startLedger: %d, endLedger: %d) -  Progress: %d/%d ledgers (%d%%) | %.2f ledgers/sec | %d total rows | ETA: %s",
 				startLedger, endLedger,
 				processedCount, totalLedgers, currentPercent, ledgersPerSec,
-				totalRowsInserted, formatDuration(timeRemaining))
+				totalRowsInserted, helpers.FormatDuration(timeRemaining))
 
 			lastReportedPercent = currentPercent
 		}
@@ -381,41 +382,11 @@ func main() {
 	fmt.Println("════════════════════════════════════════════════════════════")
 	fmt.Printf("  Ledgers processed:    %d\n", processedCount)
 	fmt.Printf("  Total rows inserted:  %d\n", totalRowsInserted)
-	fmt.Printf("  Total time:           %s\n", formatDuration(elapsed))
+	fmt.Printf("  Total time:           %s\n", helpers.FormatDuration(elapsed))
 	fmt.Printf("  Average speed:        %.2f ledgers/sec\n", float64(processedCount)/elapsed.Seconds())
 	fmt.Printf("  Insert rate:          %.2f rows/sec\n", float64(totalRowsInserted)/elapsed.Seconds())
 	fmt.Printf("  Avg rows per ledger:  %.1f\n", float64(totalRowsInserted)/float64(processedCount))
 	fmt.Println("════════════════════════════════════════════════════════════")
-}
-
-func connectClickHouse(host string, port int, password, database string) (clickhouse.Conn, error) {
-	conn, err := clickhouse.Open(&clickhouse.Options{
-		Addr: []string{fmt.Sprintf("%s:%d", host, port)},
-		Auth: clickhouse.Auth{
-			Database: database,
-			Username: "default",
-			Password: password,
-		},
-		Settings: clickhouse.Settings{
-			"max_execution_time": 60,
-		},
-		DialTimeout: 5 * time.Second,
-		Compression: &clickhouse.Compression{
-			Method: clickhouse.CompressionLZ4,
-		},
-		MaxOpenConns: 5,
-		MaxIdleConns: 2,
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	if err := conn.Ping(context.Background()); err != nil {
-		return nil, err
-	}
-
-	return conn, nil
 }
 
 func writeBatchToClickHouse(ctx context.Context, conn clickhouse.Conn, database string, batchData []EventEntry) (int, error) {
@@ -645,20 +616,4 @@ func countUniqueAddresses(batchData []EventEntry) int {
 		}
 	}
 	return len(uniqueAddresses)
-}
-
-func formatDuration(d time.Duration) string {
-	d = d.Round(time.Second)
-	h := d / time.Hour
-	d -= h * time.Hour
-	m := d / time.Minute
-	d -= m * time.Minute
-	s := d / time.Second
-
-	if h > 0 {
-		return fmt.Sprintf("%dh %dm %ds", h, m, s)
-	} else if m > 0 {
-		return fmt.Sprintf("%dm %ds", m, s)
-	}
-	return fmt.Sprintf("%ds", s)
 }
